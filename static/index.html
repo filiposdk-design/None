@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Theater</title>
+<style>
+  :root { --bg:#0b0d12; --card:#161a22; --fg:#f2f4f8; --dim:#8a93a6; --accent:#f5b83d; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family: system-ui, Roboto, sans-serif; overflow:hidden; }
+  /* TV overscan-safe padding (5%) */
+  #home { padding:5vh 5vw; height:100%; overflow-y:auto; scroll-behavior:smooth; }
+  h1 { font-size:4.4vh; margin:0 0 1vh; letter-spacing:.02em; }
+  .hint { color:var(--dim); font-size:2.2vh; margin-bottom:4vh; }
+  #grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(22vw,1fr)); gap:3vh 2vw; }
+  .card { background:var(--card); border-radius:1.2vh; overflow:hidden; outline:none;
+    transition:transform .15s, box-shadow .15s; cursor:pointer; }
+  .card:focus { transform:scale(1.07); box-shadow:0 0 0 .5vh var(--accent), 0 2vh 5vh #000a; z-index:2; }
+  .poster { aspect-ratio:16/9; background:#222 center/cover no-repeat; display:flex;
+    align-items:center; justify-content:center; font-size:8vh; color:#fff3; position:relative; }
+  .bar { position:absolute; left:0; bottom:0; height:.6vh; background:var(--accent); }
+  .meta { padding:1.4vh 1.2vw; font-size:2.6vh; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .empty { font-size:3vh; color:var(--dim); line-height:1.6; max-width:70vw; }
+  code { background:#222; padding:.2em .5em; border-radius:.4em; color:var(--accent); }
+
+  #player { position:fixed; inset:0; background:#000; display:none; }
+  #player.on { display:block; }
+  video { width:100%; height:100%; object-fit:contain; background:#000; }
+  #osd { position:absolute; left:0; right:0; bottom:0; padding:4vh 5vw 6vh;
+    background:linear-gradient(transparent, #000d 40%); transition:opacity .3s; }
+  #osd.hide { opacity:0; pointer-events:none; }
+  #ptitle { font-size:3.6vh; margin-bottom:2vh; }
+  #track { height:1vh; background:#fff3; border-radius:1vh; position:relative; }
+  #fill { position:absolute; inset:0 auto 0 0; background:var(--accent); border-radius:1vh; }
+  #times { display:flex; justify-content:space-between; color:var(--dim); font-size:2.4vh; margin-top:1.2vh; }
+  #controls { display:flex; gap:1.5vw; justify-content:center; margin-top:2.5vh; }
+  .btn { background:#ffffff1a; color:var(--fg); border:0; border-radius:1vh; font-size:2.6vh;
+    padding:1.4vh 2.2vw; outline:none; cursor:pointer; }
+  .btn:focus { background:var(--accent); color:#000; }
+  #toast { position:absolute; top:6vh; left:50%; transform:translateX(-50%); background:#000b;
+    padding:1.2vh 2.4vw; border-radius:1vh; font-size:3vh; opacity:0; transition:opacity .25s; }
+  #toast.on { opacity:1; }
+</style>
+</head>
+<body>
+<div id="home">
+  <h1>Home Theater</h1>
+  <div class="hint">◀ ▲ ▼ ▶ to move · OK to play · BACK to return</div>
+  <div id="grid"></div>
+</div>
+
+<div id="player">
+  <video id="v" playsinline></video>
+  <div id="toast"></div>
+  <div id="osd">
+    <div id="ptitle"></div>
+    <div id="track"><div id="fill"></div></div>
+    <div id="times"><span id="cur">0:00</span><span id="dur">0:00</span></div>
+    <div id="controls">
+      <button class="btn" data-act="back10">⟲ 10s</button>
+      <button class="btn" data-act="toggle" id="playbtn">⏸ Pause</button>
+      <button class="btn" data-act="fwd30">30s ⟳</button>
+      <button class="btn" data-act="subs" id="subbtn">CC Off</button>
+      <button class="btn" data-act="fs">⛶ Fullscreen</button>
+      <button class="btn" data-act="close">✕ Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+const v = $('#v'), player = $('#player'), osd = $('#osd');
+let items = [], current = null, osdTimer, toastTimer;
+
+const store = {
+  get(k){ try { return JSON.parse(localStorage.getItem(k)); } catch { return null; } },
+  set(k,val){ try { localStorage.setItem(k, JSON.stringify(val)); } catch {} }
+};
+const fmt = s => { s = Math.max(0, s|0); const h = s/3600|0, m = (s%3600)/60|0, x = s%60;
+  return (h ? h + ':' + String(m).padStart(2,'0') : m) + ':' + String(x).padStart(2,'0'); };
+const enc = p => '/media/' + p.split('/').map(encodeURIComponent).join('/');
+
+async function load() {
+  items = await (await fetch('/api/library')).json();
+  const g = $('#grid'); g.innerHTML = '';
+  if (!items.length) {
+    g.innerHTML = '<div class="empty">No videos yet. Put your movie files in the <code>media</code> folder ' +
+      '(MP4 / H.264 plays best on Android TV) and press OK to refresh. Optional: add a poster image ' +
+      'and <code>.vtt</code> subtitles with the same filename.</div>';
+    g.firstChild.tabIndex = 0; g.firstChild.onclick = load; g.firstChild.focus(); return;
+  }
+  items.forEach((it, i) => {
+    const c = document.createElement('div'); c.className = 'card'; c.tabIndex = 0;
+    const pos = store.get('pos:' + it.id);
+    c.innerHTML = `<div class="poster">${it.poster ? '' : '🎬'}</div><div class="meta"></div>`;
+    if (it.poster) c.firstChild.style.backgroundImage = `url("${enc(it.poster)}")`;
+    if (pos && pos.d) { const b = document.createElement('div'); b.className = 'bar';
+      b.style.width = (100 * pos.t / pos.d) + '%'; c.firstChild.appendChild(b); }
+    c.lastChild.textContent = it.title;
+    c.onclick = () => play(it);
+    g.appendChild(c);
+  });
+  g.firstChild.focus();
+}
+
+function play(it) {
+  current = it;
+  v.innerHTML = ''; v.src = enc(it.id);
+  it.subs.forEach((s, i) => { const t = document.createElement('track');
+    t.kind = 'subtitles'; t.src = enc(s); t.label = s.split('/').pop(); t.srclang = 'en';
+    v.appendChild(t); });
+  $('#ptitle').textContent = it.title;
+  $('#subbtn').style.display = it.subs.length ? '' : 'none';
+  player.classList.add('on');
+  const pos = store.get('pos:' + it.id);
+  v.onloadedmetadata = () => {
+    if (pos && pos.t > 10 && pos.t < v.duration - 30) { v.currentTime = pos.t; toast('Resumed at ' + fmt(pos.t)); }
+    [...v.textTracks].forEach(t => t.mode = 'disabled'); updateSubBtn();
+  };
+  v.play().catch(() => {});
+  enterFs();
+  showOsd(); $('#playbtn').focus();
+}
+
+function close() {
+  save(); v.pause(); v.removeAttribute('src'); v.load();
+  player.classList.remove('on');
+  if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
+  load();
+}
+function save() {
+  if (current && v.duration) store.set('pos:' + current.id, { t: v.currentTime, d: v.duration });
+}
+function enterFs() {
+  const el = document.documentElement;
+  if (!document.fullscreenElement && el.requestFullscreen) el.requestFullscreen().catch(() => {});
+}
+function seek(d) { v.currentTime = Math.min(Math.max(0, v.currentTime + d), v.duration || 0);
+  toast((d > 0 ? '+' : '') + d + 's'); showOsd(); }
+function toggle() { v.paused ? v.play() : v.pause(); showOsd(); }
+function toast(t) { const e = $('#toast'); e.textContent = t; e.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => e.classList.remove('on'), 1200); }
+function showOsd() { osd.classList.remove('hide'); clearTimeout(osdTimer);
+  osdTimer = setTimeout(() => { if (!v.paused) osd.classList.add('hide'); }, 4000); }
+function cycleSubs() {
+  const tr = [...v.textTracks]; if (!tr.length) return;
+  const i = tr.findIndex(t => t.mode === 'showing');
+  tr.forEach(t => t.mode = 'disabled');
+  if (i + 1 < tr.length) tr[i + 1].mode = 'showing';
+  updateSubBtn();
+}
+function updateSubBtn() { const t = [...v.textTracks].find(t => t.mode === 'showing');
+  $('#subbtn').textContent = t ? 'CC: ' + t.label : 'CC Off'; }
+
+const acts = { back10: () => seek(-10), fwd30: () => seek(30), toggle, subs: cycleSubs,
+  fs: () => document.fullscreenElement ? document.exitFullscreen() : enterFs(), close };
+document.querySelectorAll('[data-act]').forEach(b => b.onclick = () => acts[b.dataset.act]());
+
+v.ontimeupdate = () => {
+  $('#fill').style.width = (100 * v.currentTime / (v.duration || 1)) + '%';
+  $('#cur').textContent = fmt(v.currentTime); $('#dur').textContent = fmt(v.duration);
+};
+v.onplay = () => { $('#playbtn').textContent = '⏸ Pause'; showOsd(); };
+v.onpause = () => { $('#playbtn').textContent = '▶ Play'; save(); showOsd(); };
+v.onended = () => { if (current) store.set('pos:' + current.id, null); close(); };
+setInterval(save, 5000);
+
+// Spatial D-pad navigation for the library grid
+function moveFocus(dir) {
+  const els = [...document.querySelectorAll(player.classList.contains('on') ? '.btn' : '.card')]
+    .filter(e => e.offsetParent);
+  const a = document.activeElement; if (!els.includes(a)) { els[0] && els[0].focus(); return; }
+  const r = a.getBoundingClientRect(), cx = r.left + r.width/2, cy = r.top + r.height/2;
+  let best = null, bd = Infinity;
+  for (const e of els) { if (e === a) continue;
+    const q = e.getBoundingClientRect(), dx = q.left + q.width/2 - cx, dy = q.top + q.height/2 - cy;
+    const ok = { left: dx < -5, right: dx > 5, up: dy < -5, down: dy > 5 }[dir]; if (!ok) continue;
+    const main = dir === 'left' || dir === 'right' ? Math.abs(dx) : Math.abs(dy);
+    const cross = dir === 'left' || dir === 'right' ? Math.abs(dy) : Math.abs(dx);
+    const d = main + cross * 3; if (d < bd) { bd = d; best = e; } }
+  if (best) { best.focus(); best.scrollIntoView({ block: 'nearest' }); }
+}
+
+document.addEventListener('keydown', e => {
+  const k = e.key, inPlayer = player.classList.contains('on');
+  const dir = { ArrowLeft:'left', ArrowRight:'right', ArrowUp:'up', ArrowDown:'down' }[k];
+  if (inPlayer) {
+    const hidden = osd.classList.contains('hide');
+    if (k === 'Escape' || k === 'Backspace' || k === 'GoBack' || k === 'BrowserBack') {
+      e.preventDefault(); if (!hidden && !v.paused) { osd.classList.add('hide'); } else close(); return; }
+    if (k === 'MediaPlayPause' || k === ' ' ) { e.preventDefault(); toggle(); return; }
+    if (k === 'MediaPlay') { v.play(); return; } if (k === 'MediaPause') { v.pause(); return; }
+    if (k === 'MediaFastForward' || k === 'MediaTrackNext') { seek(30); return; }
+    if (k === 'MediaRewind' || k === 'MediaTrackPrevious') { seek(-10); return; }
+    if (hidden) { // OSD hidden: arrows seek directly, OK toggles
+      e.preventDefault();
+      if (dir === 'left') seek(-10); else if (dir === 'right') seek(30);
+      else { showOsd(); $('#playbtn').focus(); }
+      return;
+    }
+    showOsd();
+    if (dir) { e.preventDefault(); moveFocus(dir); }
+    return;
+  }
+  if (dir) { e.preventDefault(); moveFocus(dir); }
+  else if (k === 'Enter' && document.activeElement.onclick) { e.preventDefault(); document.activeElement.click(); }
+});
+['mousemove','click'].forEach(ev => player.addEventListener(ev, showOsd));
+load();
+</script>
+</body>
+</html>
